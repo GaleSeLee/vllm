@@ -2,6 +2,7 @@ from collections import deque
 import enum
 import time
 from typing import Deque, Dict, Iterable, List, Optional, Tuple, Union
+import json
 
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.block_manager import AllocStatus, BlockSpaceManager
@@ -67,6 +68,7 @@ class Scheduler:
         self.prompt_limit = min(self.scheduler_config.max_model_len,
                                 self.scheduler_config.max_num_batched_tokens)
 
+        self.max_waiting = self.scheduler_config.max_waiting
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name="fcfs")
         # Create the block space manager.
@@ -88,40 +90,25 @@ class Scheduler:
         self.waiting.append(seq_group)
 
     def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
-        """Aborts a sequence group with the given ID.
-
-        Check if the sequence group with the given ID
-            is present in any of the state queue.
-        If present, remove the sequence group from the state queue.
-            Also, if any of the sequences in the sequence group is not finished,
-                free the sequence with status `FINISHED_ABORTED`.
-        Otherwise, do nothing.
-
-        Args:
-            request_id: The ID(s) of the sequence group to abort.
-        """
         if isinstance(request_id, str):
             request_id = (request_id, )
         request_ids = set(request_id)
         for state_queue in [self.waiting, self.running, self.swapped]:
-            aborted_groups = []
-            for seq_group in state_queue:
-                if not request_ids:
-                    # Using 'break' here may add two extra iterations,
-                    # but is acceptable to reduce complexity .
-                    break
+            # We need to reverse the list as we are removing elements
+            # from it as we iterate over it. If we don't do it,
+            # indices will get messed up and we will skip over elements.
+            for seq_group in reversed(state_queue):
                 if seq_group.request_id in request_ids:
-                    # Appending aborted group into pending list.
-                    aborted_groups.append(seq_group)
+                    # Remove the sequence group from the state queue.
+                    state_queue.remove(seq_group)
+                    for seq in seq_group.get_seqs():
+                        if seq.is_finished():
+                            continue
+                        seq.status = SequenceStatus.FINISHED_ABORTED
+                        self.free_seq(seq)
                     request_ids.remove(seq_group.request_id)
-            for aborted_group in aborted_groups:
-                # Remove the sequence group from the state queue.
-                state_queue.remove(aborted_group)
-                for seq in seq_group.get_seqs():
-                    if seq.is_finished():
-                        continue
-                    seq.status = SequenceStatus.FINISHED_ABORTED
-                    self.free_seq(seq)
+                    if not request_ids:
+                        return
 
     def has_unfinished_seqs(self) -> bool:
         return self.waiting or self.running or self.swapped
@@ -368,11 +355,13 @@ class Scheduler:
         # over sequence groups with a single sequence.
         # TODO(woosuk): Support recomputation for sequence groups with multiple
         # sequences. This may require a more sophisticated CUDA kernel.
-        if preemption_mode is None:
-            if seq_group.get_max_num_running_seqs() == 1:
-                preemption_mode = PreemptionMode.RECOMPUTE
-            else:
-                preemption_mode = PreemptionMode.SWAP
+
+        preemption_mode = PreemptionMode.RECOMPUTE
+        # if preemption_mode is None:
+            # if seq_group.get_max_num_running_seqs() == 1:
+                # preemption_mode = PreemptionMode.RECOMPUTE
+            # else:
+                # preemption_mode = PreemptionMode.SWAP
         if preemption_mode == PreemptionMode.RECOMPUTE:
             self._preempt_by_recompute(seq_group)
         elif preemption_mode == PreemptionMode.SWAP:
@@ -426,3 +415,29 @@ class Scheduler:
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
+
+
+    def abort_time_limit_prompt(self, record):
+        _waiting = Deque()
+        _abort = Deque()
+        _tick_time = time.monotonic()
+        while len(self.waiting) != 0:
+            _task = self.waiting.popleft()
+            if record[_task.request_id]["process_flag"] == False and _tick_time - record[_task.request_id]["arrival_time"] > self.max_waiting:
+                _abort.append(_task)
+            else:
+                _waiting.append(_task)
+
+        while len(_waiting) != 0:
+            self.waiting.append(_waiting.popleft())
+
+        if len(_abort) != 0:
+            _abort_time = time.monotonic()
+            with open("record.json", "a") as f:
+                for ii in range(len(_abort)):
+                    record[_abort[ii].request_id]["abort_time"] = _abort_time
+                    record[_abort[ii].request_id]["request_id"] = _abort[ii].request_id
+                    json.dump(record[_abort[ii].request_id],f)
+                    f.write("\n")
+
+        return _abort

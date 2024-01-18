@@ -33,7 +33,7 @@ _MODELS = {
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
-    "PhiForCausalLM": ("phi", "PhiForCausalLM"),
+    "PhiForCausalLM": ("phi_1_5", "PhiForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
     "YiForCausalLM": ("yi", "YiForCausalLM"),

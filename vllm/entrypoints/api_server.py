@@ -15,6 +15,8 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
 engine = None
 
+global_request_id = 0
+
 
 @app.get("/health")
 async def health() -> Response:
@@ -35,18 +37,17 @@ async def generate(request: Request) -> Response:
     prompt = request_dict.pop("prompt")
     stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
-    request_id = random_uuid()
+    global global_request_id
+    request_id = global_request_id#random_uuid()
+    global_request_id += 1
 
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
         async for request_output in results_generator:
-            prompt = request_output.prompt
-            text_outputs = [
-                prompt + output.text for output in request_output.outputs
-            ]
-            ret = {"text": text_outputs}
+            token_outputs = [output.token_ids for output in request_output.outputs]
+            ret = {"token": token_outputs}
             yield (json.dumps(ret) + "\0").encode("utf-8")
 
     if stream:
@@ -74,18 +75,12 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--ssl-keyfile", type=str, default=None)
     parser.add_argument("--ssl-certfile", type=str, default=None)
-    parser.add_argument(
-        "--root-path",
-        type=str,
-        default=None,
-        help="FastAPI root_path when app is behind a path based routing proxy")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
 
-    app.root_path = args.root_path
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,

@@ -35,6 +35,7 @@ class EngineArgs:
     quantization: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
+    max_waiting: int = 20
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -176,6 +177,10 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_paddings,
                             help='maximum number of paddings in a batch')
+        parser.add_argument('--max-waiting',
+                            type=int,
+                            default=EngineArgs.max_waiting,
+                            help='maximum waiting time for one request(s)')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
@@ -233,7 +238,8 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
-                                           self.max_paddings)
+                                           self.max_paddings,
+                                           self.max_waiting)
         return model_config, cache_config, parallel_config, scheduler_config
 
 

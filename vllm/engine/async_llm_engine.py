@@ -11,6 +11,11 @@ from vllm.engine.ray_utils import initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
+from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
+                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+
+import json
+import traceback
 
 logger = init_logger(__name__)
 
@@ -173,7 +178,7 @@ class RequestTracker:
 class _AsyncLLMEngine(LLMEngine):
     """Extension of LLMEngine to add async methods."""
 
-    async def step_async(self) -> List[RequestOutput]:
+    async def step_async(self, is_abort=False) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
         The workers are ran asynchronously if possible.
 
@@ -183,25 +188,65 @@ class _AsyncLLMEngine(LLMEngine):
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        if is_abort is not True:
+            seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+            for record_group in seq_group_metadata_list:
+                if record_group.is_prompt and self.record[record_group.request_id].get("process_flag", None) == False:
+                    print("######## request id ##########")
+                    print(record_group.request_id)
+                    self.record[record_group.request_id]["request_id"] = record_group.request_id
+                    self.record[record_group.request_id]["First_Process_Time"] = time.monotonic()
+                    self.record[record_group.request_id]["process_flag"] = True
 
-        if not scheduler_outputs.is_empty():
-            # Execute the model.
-            all_outputs = await self._run_workers_async(
-                "execute_model",
-                driver_kwargs={
-                    "seq_group_metadata_list": seq_group_metadata_list,
-                    "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
-                    "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
-                    "blocks_to_copy": scheduler_outputs.blocks_to_copy,
-                })
+            if not scheduler_outputs.is_empty():
+                self.performance_monitor[self.monitor_count] = dict()
+                self.performance_monitor[self.monitor_count]["Start_Time"] = time.monotonic()
+                self.performance_monitor[self.monitor_count]["toekn_num"] = len(seq_group_metadata_list)
+                # Execute the model.
+                all_outputs = await self._run_workers_async(
+                    "execute_model",
+                    driver_kwargs={
+                        "seq_group_metadata_list": seq_group_metadata_list,
+                        "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
+                        "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
+                        "blocks_to_copy": scheduler_outputs.blocks_to_copy,
+                    })
 
-            # Only the driver worker returns the sampling results.
-            output = all_outputs[0]
+                # Only the driver worker returns the sampling results.
+                output = all_outputs[0]
+                self.performance_monitor[self.monitor_count]["Finish_Time"] = time.monotonic()
+                self.performance_monitor[self.monitor_count]["During_Time"] = self.performance_monitor[self.monitor_count]["Finish_Time"] - self.performance_monitor[self.monitor_count]["Start_Time"]
+                self.monitor_count += 1
+                if self.monitor_count % 30 == 0:
+                    with open("performance_monitor.json", "a") as f:
+                        for ii in range(self.monitor_count_save, self.monitor_count):
+                            json.dump(self.performance_monitor[ii], f)
+                            f.write("\n")
+                        self.monitor_count_save = self.monitor_count
+            else:
+                output = []
+
+            return self._process_model_outputs(output, scheduler_outputs)
         else:
-            output = []
+            return self._process_abort_request()
 
-        return self._process_model_outputs(output, scheduler_outputs)
+
+    def _process_abort_request(self)->List[RequestOutput]:
+        _abort_result = self.scheduler.abort_time_limit_prompt(self.record)
+        if len(_abort_result) == 0:
+            return []
+
+        for seq_group in _abort_result:
+            for seq in seq_group.get_seqs():
+                seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+
+        # Create the outputs.
+        request_outputs: List[RequestOutput] = []
+        for seq_group in _abort_result:
+            request_output = RequestOutput.from_seq_group(seq_group)
+            request_outputs.append(request_output)
+
+        return request_outputs
 
     async def _run_workers_async(
         self,
@@ -253,8 +298,7 @@ class AsyncLLMEngine:
         log_requests: Whether to log the requests.
         start_engine_loop: If True, the background task to run the engine
             will be automatically started in the generate call.
-        *args: Arguments for LLMEngine.
-        *kwargs: Arguments for LLMEngine.
+        *args, *kwargs: Arguments for LLMEngine.
     """
 
     _engine_class: Type[_AsyncLLMEngine] = _AsyncLLMEngine
@@ -318,10 +362,12 @@ class AsyncLLMEngine:
                 self._engine_class).remote
         return engine_class(*args, **kwargs)
 
-    async def engine_step(self) -> bool:
+    async def engine_step(self, is_abort=False) -> bool:
         """Kick the engine to process the waiting requests.
 
         Returns True if there are in-progress requests."""
+
+        # traceback.print_stack()
 
         new_requests, finished_requests = (
             self._request_tracker.get_new_and_finished_requests())
@@ -340,13 +386,14 @@ class AsyncLLMEngine:
         if self.engine_use_ray:
             request_outputs = await self.engine.step.remote()
         else:
-            request_outputs = await self.engine.step_async()
+            request_outputs = await self.engine.step_async(is_abort=is_abort)
 
         # Put the outputs into the corresponding streams.
         for request_output in request_outputs:
             self._request_tracker.process_request_output(
                 request_output, verbose=self.log_requests)
 
+        # print(__file__, "#########", len(request_outputs))
         return len(request_outputs) > 0
 
     async def _engine_abort(self, request_ids: Iterable[str]):
@@ -358,7 +405,12 @@ class AsyncLLMEngine:
     async def run_engine_loop(self):
         # Initialize the RequestTracker here so it uses the right event loop.
         has_requests_in_progress = False
+        loop_count = 0
         while True:
+            loop_count += 1
+            # if loop_count % 100 == 0:
+            #     loop_count = 0
+            await self.engine_step(is_abort=True)
             if not has_requests_in_progress:
                 await self._request_tracker.wait_for_new_requests()
             has_requests_in_progress = await self.engine_step()
@@ -381,13 +433,15 @@ class AsyncLLMEngine:
                 if shortened_token_ids is not None:
                     shortened_token_ids = shortened_token_ids[:self.
                                                               max_log_len]
-            logger.info(f"Received request {request_id}: "
-                        f"prompt: {shortened_prompt!r}, "
-                        f"sampling params: {sampling_params}, "
-                        f"prompt token ids: {shortened_token_ids}.")
+            #logger.info(f"Received request {request_id}: "
+            #            f"prompt: {shortened_prompt!r}, "
+            #            f"sampling params: {sampling_params}, "
+            #            f"prompt token ids: {shortened_token_ids}.")
 
         if not self.is_running:
             if self.start_engine_loop:
+                # traceback.print_stack()
+                # print("\n\n\n")
                 self.start_background_loop()
             else:
                 raise AsyncEngineDeadError(
@@ -429,49 +483,6 @@ class AsyncLLMEngine:
         Yields:
             The output `RequestOutput` objects from the LLMEngine for the
             request.
-
-        Details:
-            - If the engine is not running, start the background loop,
-              which iteratively invokes
-              :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`
-              to process the waiting requests.
-            - Add the request to the engine's `RequestTracker`.
-              On the next background loop, this request will be sent to
-              the underlying engine.
-              Also, a corresponding `AsyncStream` will be created.
-            - Wait for the request outputs from `AsyncStream` and yield them.
-
-        Example:
-            >>> # Please refer to entrypoints/api_server.py for
-            >>> # the complete example.
-            >>>
-            >>> # initialize the engine and the example input
-            >>> engine = AsyncLLMEngine.from_engine_args(engine_args)
-            >>> example_input = {
-            >>>     "prompt": "What is LLM?",
-            >>>     "stream": False, # assume the non-streaming case
-            >>>     "temperature": 0.0,
-            >>>     "request_id": 0,
-            >>> }
-            >>>
-            >>> # start the generation
-            >>> results_generator = engine.generate(
-            >>>    example_input["prompt"],
-            >>>    SamplingParams(temperature=example_input["temperature"]),
-            >>>    example_input["request_id"])
-            >>>
-            >>> # get the results
-            >>> final_output = None
-            >>> async for request_output in results_generator:
-            >>>     if await request.is_disconnected():
-            >>>         # Abort the request if the client disconnects.
-            >>>         await engine.abort(request_id)
-            >>>         # Return or raise an error
-            >>>         ...
-            >>>     final_output = request_output
-            >>>
-            >>> # Process and return the final output
-            >>> ...
         """
         # Preprocess the request.
         # This should not be used for logging, as it is monotonic time.

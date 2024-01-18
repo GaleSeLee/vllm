@@ -13,6 +13,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import in_wsl
+from torch.profiler import record_function
 
 logger = init_logger(__name__)
 
@@ -444,6 +445,7 @@ class ModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> Optional[SamplerOutput]:
+        #with record_function("execute model"):
         input_tokens, input_positions, input_metadata, sampling_metadata = (
             self.prepare_input_tensors(seq_group_metadata_list))
         # Execute the model.
