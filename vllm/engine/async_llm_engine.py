@@ -215,15 +215,18 @@ class _AsyncLLMEngine(LLMEngine):
                 output = all_outputs[0]
                 self.performance_monitor[self.monitor_count]["Finish_Time"] = time.monotonic()
                 self.performance_monitor[self.monitor_count]["During_Time"] = self.performance_monitor[self.monitor_count]["Finish_Time"] - self.performance_monitor[self.monitor_count]["Start_Time"]
-                self.monitor_count += 1
-                if self.monitor_count % 30 == 0:
+
+                if self.monitor_count % 10 == 0:
                     total_num_gpu_blocks = self.cache_config.num_gpu_blocks
                     num_free_gpu_blocks = (
                         self.scheduler.block_manager.get_num_free_gpu_blocks())
                     num_used_gpu_blocks = total_num_gpu_blocks - num_free_gpu_blocks
                     gpu_cache_usage = num_used_gpu_blocks / total_num_gpu_blocks
-                    self.performance_monitor[self.monitor_count-1]["GPU_KV_Cache_Usage"] = gpu_cache_usage*100
-                    with open("performance_monitor.json", "a") as f:
+                    self.performance_monitor[self.monitor_count]["GPU_KV_Cache_Usage"] = gpu_cache_usage*100
+
+                self.monitor_count += 1
+                if self.monitor_count % 30 == 0:
+                    with open("performance_monitor_gamme_shape.json", "a") as f:
                         for ii in range(self.monitor_count_save, self.monitor_count):
                             json.dump(self.performance_monitor[ii], f)
                             f.write("\n")
