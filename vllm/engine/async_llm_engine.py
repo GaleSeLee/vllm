@@ -192,16 +192,15 @@ class _AsyncLLMEngine(LLMEngine):
             seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
             for record_group in seq_group_metadata_list:
                 if record_group.is_prompt and self.record[record_group.request_id].get("process_flag", None) == False:
-                    print("######## request id ##########")
-                    print(record_group.request_id)
                     self.record[record_group.request_id]["request_id"] = record_group.request_id
                     self.record[record_group.request_id]["First_Process_Time"] = time.monotonic()
+                    self.record[record_group.request_id]["Waiting_Time"] = self.record[record_group.request_id]["First_Process_Time"] - self.record[record_group.request_id]["arrival_time"]
                     self.record[record_group.request_id]["process_flag"] = True
 
             if not scheduler_outputs.is_empty():
                 self.performance_monitor[self.monitor_count] = dict()
                 self.performance_monitor[self.monitor_count]["Start_Time"] = time.monotonic()
-                self.performance_monitor[self.monitor_count]["toekn_num"] = len(seq_group_metadata_list)
+                self.performance_monitor[self.monitor_count]["token_num"] = len(seq_group_metadata_list)
                 # Execute the model.
                 all_outputs = await self._run_workers_async(
                     "execute_model",
@@ -218,6 +217,12 @@ class _AsyncLLMEngine(LLMEngine):
                 self.performance_monitor[self.monitor_count]["During_Time"] = self.performance_monitor[self.monitor_count]["Finish_Time"] - self.performance_monitor[self.monitor_count]["Start_Time"]
                 self.monitor_count += 1
                 if self.monitor_count % 30 == 0:
+                    total_num_gpu_blocks = self.cache_config.num_gpu_blocks
+                    num_free_gpu_blocks = (
+                        self.scheduler.block_manager.get_num_free_gpu_blocks())
+                    num_used_gpu_blocks = total_num_gpu_blocks - num_free_gpu_blocks
+                    gpu_cache_usage = num_used_gpu_blocks / total_num_gpu_blocks
+                    self.performance_monitor[self.monitor_count-1]["GPU_KV_Cache_Usage"] = gpu_cache_usage*100
                     with open("performance_monitor.json", "a") as f:
                         for ii in range(self.monitor_count_save, self.monitor_count):
                             json.dump(self.performance_monitor[ii], f)
@@ -405,15 +410,17 @@ class AsyncLLMEngine:
     async def run_engine_loop(self):
         # Initialize the RequestTracker here so it uses the right event loop.
         has_requests_in_progress = False
-        loop_count = 0
+        loop_count = 1
         while True:
-            loop_count += 1
             # if loop_count % 100 == 0:
             #     loop_count = 0
-            await self.engine_step(is_abort=True)
+            while loop_count % 100 == 0:
+                loop_count = 1
+                await self.engine_step(is_abort=True)
             if not has_requests_in_progress:
                 await self._request_tracker.wait_for_new_requests()
             has_requests_in_progress = await self.engine_step()
+            loop_count += 1
             await asyncio.sleep(0)
 
     async def add_request(

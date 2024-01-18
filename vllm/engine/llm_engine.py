@@ -613,6 +613,8 @@ class LLMEngine:
         for record_group in scheduled_seq_groups:
             if record_group.is_finished():
                 self.record[record_group.request_id]["Finish_Time"] = time.monotonic()
+                self.record[record_group.request_id]["Prompt_Token_Num"] = record_group.get_seqs()[0].get_prompt_len()
+                self.record[record_group.request_id]["Output_Token_Num"] = record_group.get_seqs()[0].get_output_len()
                 self.record[record_group.request_id]["During_Time"] = self.record[record_group.request_id]["Finish_Time"] - self.record[record_group.request_id]["First_Process_Time"]
                 with open("record_request.json","a") as f:
                     json.dump(self.record[record_group.request_id], f)
