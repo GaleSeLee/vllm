@@ -433,7 +433,7 @@ class Scheduler:
 
         if len(_abort) != 0:
             _abort_time = time.monotonic()
-            with open("abort_gamma_scale.json", "a") as f:
+            with open("abort_zipf.json", "a") as f:
                 for ii in range(len(_abort)):
                     record[_abort[ii].request_id]["abort_time"] = _abort_time
                     record[_abort[ii].request_id]["request_id"] = _abort[ii].request_id

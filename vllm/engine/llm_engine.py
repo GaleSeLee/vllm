@@ -616,7 +616,7 @@ class LLMEngine:
                 self.record[record_group.request_id]["Prompt_Token_Num"] = record_group.get_seqs()[0].get_prompt_len()
                 self.record[record_group.request_id]["Output_Token_Num"] = record_group.get_seqs()[0].get_output_len()
                 self.record[record_group.request_id]["During_Time"] = self.record[record_group.request_id]["Finish_Time"] - self.record[record_group.request_id]["First_Process_Time"]
-                with open("record_request_gamme_scale.json","a") as f:
+                with open("record_request_zipf.json","a") as f:
                     json.dump(self.record[record_group.request_id], f)
                     f.write("\n")
 
