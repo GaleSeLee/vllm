@@ -226,7 +226,7 @@ class _AsyncLLMEngine(LLMEngine):
 
                 self.monitor_count += 1
                 if self.monitor_count % 30 == 0:
-                    with open("performance_monitor_zipf.json", "a") as f:
+                    with open("performance_monitor_gamma_shape.json", "a") as f:
                         for ii in range(self.monitor_count_save, self.monitor_count):
                             json.dump(self.performance_monitor[ii], f)
                             f.write("\n")
