@@ -2,7 +2,7 @@ import time
 from typing import Iterable, List, Optional, Tuple, Type, Union
 
 from transformers import PreTrainedTokenizer
-
+import json
 import vllm
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
@@ -66,6 +66,7 @@ class LLMEngine:
 
     def __init__(
         self,
+        log_prefix,
         model_config: ModelConfig,
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
@@ -115,6 +116,13 @@ class LLMEngine:
         self._init_tokenizer()
         self.detokenizer = Detokenizer(self.tokenizer)
         self.seq_counter = Counter()
+
+        self.performance_monitor = dict()
+        self.benchmark_record = dict()
+        self.monitor_count = 0
+        self.monitor_count_save = 0
+
+        self.log_prefix = log_prefix
 
         self.model_executor = executor_class(
             model_config=model_config,
@@ -312,6 +320,7 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
+
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
@@ -324,11 +333,15 @@ class LLMEngine:
                              f"{max_logprobs} logprobs.")
         if arrival_time is None:
             arrival_time = time.time()
+        self.benchmark_record[request_id] = dict()
+        self.benchmark_record[request_id]["arrival_time"] = time.monotonic()
+        self.benchmark_record[request_id]["process_flag"] = False
         prompt_token_ids = self.encode_request(
             request_id=request_id,
             prompt=prompt,
             prompt_token_ids=prompt_token_ids,
             lora_request=lora_request)
+
 
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -612,6 +625,16 @@ class LLMEngine:
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
             self._process_sequence_group_outputs(seq_group, outputs)
+
+        for record_group in scheduled_seq_groups:
+            if record_group.seq_group.is_finished():
+                self.benchmark_record[record_group.seq_group.request_id]["finish_time"] = time.monotonic()
+                self.benchmark_record[record_group.seq_group.request_id]["prompt_token_num"] = record_group.seq_group.get_seqs()[0].get_prompt_len()
+                self.benchmark_record[record_group.seq_group.request_id]["output_token_num"] = record_group.seq_group.get_seqs()[0].get_output_len()
+                self.benchmark_record[record_group.seq_group.request_id]["during_time"] = self.benchmark_record[record_group.seq_group.request_id]["finish_time"] - self.benchmark_record[record_group.seq_group.request_id]["first_process_time"]
+                with open(f"benchmark_log_each_request_{self.log_prefix}.json","a") as f:
+                    json.dump(self.benchmark_record[record_group.seq_group.request_id], f)
+                    f.write("\n")
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()

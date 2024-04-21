@@ -70,6 +70,7 @@ class EngineArgs:
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
     num_speculative_tokens: Optional[int] = None
+    log_prefix:str = ""
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -482,7 +483,8 @@ class EngineArgs:
         else:
             vision_language_config = None
 
-        return EngineConfig(model_config=model_config,
+        return EngineConfig(log_prefix=self.log_prefix,
+                            model_config=model_config,
                             cache_config=cache_config,
                             parallel_config=parallel_config,
                             scheduler_config=scheduler_config,

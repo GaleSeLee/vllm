@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+import json
 from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
                     Set, Tuple, Type, Union)
@@ -207,13 +208,41 @@ class _AsyncLLMEngine(LLMEngine):
         the sequences and returns the newly generated results.
         """
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        for record_group in seq_group_metadata_list:
+            if record_group.is_prompt and self.benchmark_record[record_group.request_id].get("process_flag", None) == False:
+                self.benchmark_record[record_group.request_id]["request_id"] = record_group.request_id
+                self.benchmark_record[record_group.request_id]["first_process_time"] = time.monotonic()
+                self.benchmark_record[record_group.request_id]["waiting_time"] = self.benchmark_record[record_group.request_id]["first_process_time"] - self.benchmark_record[record_group.request_id]["arrival_time"]
+                self.benchmark_record[record_group.request_id]["process_flag"] = True
 
         if not scheduler_outputs.is_empty():
+            self.performance_monitor[self.monitor_count] = dict()
+            self.performance_monitor[self.monitor_count]["start_time"] = time.monotonic()
+            self.performance_monitor[self.monitor_count]["token_num"] = len(seq_group_metadata_list)
             # Execute the model.
             output = await self.model_executor.execute_model_async(
                 seq_group_metadata_list, scheduler_outputs.blocks_to_swap_in,
                 scheduler_outputs.blocks_to_swap_out,
                 scheduler_outputs.blocks_to_copy)
+            self.performance_monitor[self.monitor_count]["finish_time"] = time.monotonic()
+            self.performance_monitor[self.monitor_count]["during_time"] = self.performance_monitor[self.monitor_count]["finish_time"] - self.performance_monitor[self.monitor_count]["start_time"]
+
+            if self.monitor_count % 10 == 0:
+                total_num_gpu_blocks = self.cache_config.num_gpu_blocks
+                num_free_gpu_blocks = (
+                    self.scheduler.block_manager.get_num_free_gpu_blocks())
+                num_used_gpu_blocks = total_num_gpu_blocks - num_free_gpu_blocks
+                gpu_cache_usage = num_used_gpu_blocks / total_num_gpu_blocks
+                self.performance_monitor[self.monitor_count]["KVcache_usage"] = gpu_cache_usage*100
+
+            self.monitor_count += 1
+            if self.monitor_count % 30 == 0:
+                with open(f"performance_monitor_step_{self.log_prefix}.json", "a") as f:
+                    for ii in range(self.monitor_count_save, self.monitor_count):
+                        json.dump(self.performance_monitor[ii], f)
+                        f.write("\n")
+                    self.monitor_count_save = self.monitor_count
+            
         else:
             output = []
 
@@ -309,7 +338,7 @@ class AsyncLLMEngine:
         self.log_requests = log_requests
         self.max_log_len = max_log_len
         self.engine = self._init_engine(*args, **kwargs)
-
+        
         self.background_loop = None
         # We need to keep a reference to unshielded
         # task as well to prevent it from being garbage
@@ -354,6 +383,7 @@ class AsyncLLMEngine:
             max_log_len=engine_args.max_log_len,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
+            
         )
         return engine
 

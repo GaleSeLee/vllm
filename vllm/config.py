@@ -1005,7 +1005,7 @@ class EngineConfig:
     """Dataclass which contains all engine-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
     """
-
+    log_prefix:str
     model_config: ModelConfig
     cache_config: CacheConfig
     parallel_config: ParallelConfig
